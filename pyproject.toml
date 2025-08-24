@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sioyek-autoscroll"
+version = "0.1.0"
+authors = [
+  { name="Semin Kim", email="seminkim@kaist.ac.kr" }
+]
+description = "Script for auto-scrolling using sioyek python wrapper."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+  	"License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+  "sioyek  >= 0.31.11",
+  "pynput >= 1.8.1"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/SeminKim/sioyek-python-autoscroll"
+"Bug Tracker" = "https://github.com/SeminKim/sioyek-python-autoscroll/issues"
