@@ -7,15 +7,13 @@ from pynput import mouse
 # ---------------------------------
 # Parameters
 # ---------------------------------
-BASE_HZ = 240          # loop frequency
+BASE_HZ = 60          # loop frequency
 DEAD_ZONE_PX = 8       # ignore small jitters near anchor
 GAIN = 0.3             # pixels -> steps per second
-MAX_RATE = 240         # max calls per second to avoid flooding
+MAX_RATE = 60         # max calls per second to avoid flooding
 DEBUG = False          # do not call sioyek if DEBUG flag set
 
-# Timeouts (set to 0 to disable that timeout)
-GLOBAL_TIMEOUT_SEC = 30     # exit if autoscroll never starts within N seconds (0 = disabled)
-HOLD_MAX_SEC = 60           # max allowed time for a single hold/drag (0 = disabled)
+INACTIVITY_TIMEOUT_SEC = 3  # exit if no MMB click (press/release) for N seconds while *not* holding
 
 # ---------------------------------
 # State
@@ -25,11 +23,11 @@ stop_worker = threading.Event()
 worker_thread = None
 mouse_ctrl = mouse.Controller()
 
-# When did we last ENTER autoscroll (middle press)?
-hold_start_ts = None
+hold_start_ts = None          # when current hold started (for HOLD_MAX_SEC safety below; set 0 to disable)
+HOLD_MAX_SEC = 60             # max allowed time for a single hold/drag (0 = disabled)
 
-# Used by the global watchdog
-autoscroll_started_evt = threading.Event()
+last_mmb_event_ts = time.time()  # last time we saw a middle button press/release
+middle_held = False               # are we currently holding the middle button?
 
 
 def signed_excess(val, dead):
@@ -44,7 +42,7 @@ def autoscroll_loop(sioyek):
     step_accum = 0.0  # fractional step accumulator
 
     while not stop_worker.is_set():
-        # HOLD_MAX_SEC safety stop
+        # Optional per-hold safety
         if HOLD_MAX_SEC > 0 and hold_start_ts is not None:
             if time.time() - hold_start_ts > HOLD_MAX_SEC:
                 stop_worker.set()
@@ -75,66 +73,64 @@ def autoscroll_loop(sioyek):
         time.sleep(period)
 
 
-def make_on_click(sioyek, listener_ref):
+def make_on_click(sioyek):
     """Return an on_click callback bound to the given sioyek object."""
     def on_click(x, y, button, pressed):
-        nonlocal listener_ref
-        global anchor, worker_thread, hold_start_ts
+        global anchor, worker_thread, hold_start_ts, last_mmb_event_ts, middle_held
 
         if button == mouse.Button.middle:
+            last_mmb_event_ts = time.time()
+
             if pressed:
                 # Enter autoscroll mode
+                middle_held = True
                 anchor = (x, y)
                 hold_start_ts = time.time()
-                autoscroll_started_evt.set()  # tell watchdog we started
                 stop_worker.clear()
+
+                # Start worker if not running
                 if worker_thread is None or not worker_thread.is_alive():
                     worker_thread = threading.Thread(
                         target=autoscroll_loop, args=(sioyek,), daemon=True
                     )
                     worker_thread.start()
             else:
-                # Exit autoscroll mode
+                # Exit autoscroll mode; keep listener alive for future holds
+                middle_held = False
                 stop_worker.set()
-                # Stop the mouse listener to end the program
-                if listener_ref is not None:
-                    listener_ref.stop()
-                return False  # quit
     return on_click
 
 
 def run_autoscroll(sioyek):
-    """Run the autoscroll listener for the given sioyek object with timeouts."""
-    listener_ref = None
-
-    # Start mouse listener
-    listener = mouse.Listener(on_click=make_on_click(sioyek, listener_ref))
-    listener_ref = listener
+    """Run the autoscroll listener with a single inactivity watchdog."""
+    listener = mouse.Listener(on_click=make_on_click(sioyek))
     listener.start()
 
-    # Global watchdog: exit if no autoscroll ever starts within GLOBAL_TIMEOUT_SEC
-    def watchdog():
-        if GLOBAL_TIMEOUT_SEC <= 0:
+    # Single watchdog: exit if no MMB events for INACTIVITY_TIMEOUT_SEC while *not* holding
+    def inactivity_watchdog():
+        if INACTIVITY_TIMEOUT_SEC <= 0:
             return
-        if not autoscroll_started_evt.wait(timeout=GLOBAL_TIMEOUT_SEC):
-            # Never started; stop listener so program exits
-            try:
-                listener.stop()
-            except Exception:
-                pass
+        while listener.running:
+            if not middle_held and (time.time() - last_mmb_event_ts) >= INACTIVITY_TIMEOUT_SEC:
+                try:
+                    listener.stop()
+                except Exception:
+                    pass
+                break
+            time.sleep(0.2)
 
-    wd_thread = None
-    if GLOBAL_TIMEOUT_SEC > 0:
-        wd_thread = threading.Thread(target=watchdog, daemon=True)
-        wd_thread.start()
+    t = None
+    if INACTIVITY_TIMEOUT_SEC > 0:
+        t = threading.Thread(target=inactivity_watchdog, daemon=True)
+        t.start()
 
-    # Block until listener is done
+    # Block until listener stops (inactivity or external stop)
     listener.join()
 
     # Ensure worker ends
     stop_worker.set()
-    if wd_thread:
-        wd_thread.join(timeout=0.1)
+    if t:
+        t.join(timeout=0.1)
 
 
 # -------------------- main --------------------
@@ -144,6 +140,7 @@ if __name__ == '__main__':
             def move_up(self): print("↑ move_up()")
             def move_down(self): print("↓ move_down()")
         mock = Mock()
+        print("[DEBUG] Starting autoscroll (Mock).")
         run_autoscroll(mock)
         print("[autoscroll stopped]")
     else:
@@ -152,3 +149,4 @@ if __name__ == '__main__':
         sioyek.set_status_string("Scrolling...")
         run_autoscroll(sioyek)
         sioyek.clear_status_string()
+        time.sleep(0.5)  # give the status clear a moment
